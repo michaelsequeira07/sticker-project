@@ -1,4 +1,4 @@
-module sticker_project
+module github.com/michaelsequeira07/sticker-project
 
 go 1.22
 
