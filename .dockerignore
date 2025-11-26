@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
+TECH_NOTES.md
+
+# Test files
+*_test.go
+
