@@ -9,6 +9,14 @@ RUN go mod download
 
 # Copy source code
 COPY *.go ./
+COPY cache/ ./cache/
+COPY auth/ ./auth/
+COPY handlers/ ./handlers/
+COPY database/ ./database/
+COPY models/ ./models/
+COPY calculator/ ./calculator/
+COPY validation/ ./validation/
+COPY config/ ./config/
 
 # Build the application
 RUN CGO_ENABLED=1 GOOS=linux go build -o sticker-engine main.go
