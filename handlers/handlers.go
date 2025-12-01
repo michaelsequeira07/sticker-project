@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michaelsequeira07/sticker-project/auth"
+	"github.com/michaelsequeira07/sticker-project/cache"
 	"github.com/michaelsequeira07/sticker-project/calculator"
 	"github.com/michaelsequeira07/sticker-project/database"
 	"github.com/michaelsequeira07/sticker-project/models"
@@ -107,31 +109,20 @@ func CreateTransactionHandler(c *gin.Context) {
 		return
 	}
 
+	// Invalidate cache after new transaction
+	if cache.Client != nil {
+		cache.InvalidateShopperBalance(tx.ShopperID)
+	}
+
 	log.Printf("[TRANSACTION] Successfully processed transaction_id=%s shopper_id=%s stickers_earned=%d",
 		tx.TransactionID, tx.ShopperID, stickersEarned)
 
-	// Get current shopper balance
-	var totalEarned int
-	err = database.DB.QueryRow(
-		"SELECT COALESCE(SUM(stickers_earned), 0) FROM transactions WHERE shopper_id = ?",
-		tx.ShopperID,
-	).Scan(&totalEarned)
+	// Get current shopper balance (with Redis caching)
+	currentBalance, err := getShopperBalanceWithCache(tx.ShopperID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: fmt.Sprintf("Database error: %v", err)})
 		return
 	}
-
-	var totalRedeemed int
-	err = database.DB.QueryRow(
-		"SELECT COALESCE(SUM(stickers_cost), 0) FROM redemptions WHERE shopper_id = ?",
-		tx.ShopperID,
-	).Scan(&totalRedeemed)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: fmt.Sprintf("Database error: %v", err)})
-		return
-	}
-
-	currentBalance := totalEarned - totalRedeemed
 
 	c.JSON(http.StatusCreated, gin.H{
 		"transaction_id":  tx.TransactionID,
@@ -199,7 +190,12 @@ func GetShopperStatusHandler(c *gin.Context) {
 		totalRedeemed += r.StickersCost
 	}
 
-	currentBalance := totalEarned - totalRedeemed
+	// Use cached balance if available, otherwise calculate
+	currentBalance, err := getShopperBalanceWithCache(shopperID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: fmt.Sprintf("Database error: %v", err)})
+		return
+	}
 
 	status := models.ShopperStatus{
 		ShopperID:      shopperID,
@@ -286,6 +282,11 @@ func CreateRedemptionHandler(c *gin.Context) {
 		return
 	}
 
+	// Invalidate cache after redemption
+	if cache.Client != nil {
+		cache.InvalidateShopperBalance(req.ShopperID)
+	}
+
 	id, _ := result.LastInsertId()
 	newBalance := currentBalance - stickersCost
 
@@ -354,6 +355,113 @@ func GetStatsHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, stats)
+}
+
+// getShopperBalanceWithCache gets shopper balance with Redis caching
+func getShopperBalanceWithCache(shopperID string) (int, error) {
+	// Try to get from cache first
+	if cache.Client != nil {
+		balance, found, err := cache.GetShopperBalance(shopperID)
+		if err == nil && found {
+			return balance, nil
+		}
+	}
+
+	// Cache miss - calculate from database
+	var totalEarned int
+	err := database.DB.QueryRow(
+		"SELECT COALESCE(SUM(stickers_earned), 0) FROM transactions WHERE shopper_id = ?",
+		shopperID,
+	).Scan(&totalEarned)
+	if err != nil {
+		return 0, err
+	}
+
+	var totalRedeemed int
+	err = database.DB.QueryRow(
+		"SELECT COALESCE(SUM(stickers_cost), 0) FROM redemptions WHERE shopper_id = ?",
+		shopperID,
+	).Scan(&totalRedeemed)
+	if err != nil {
+		return 0, err
+	}
+
+	currentBalance := totalEarned - totalRedeemed
+
+	// Cache the result for 5 minutes
+	if cache.Client != nil {
+		cache.SetShopperBalance(shopperID, currentBalance, 5*time.Minute)
+	}
+
+	return currentBalance, nil
+}
+
+// LoginRequest represents a login request
+type LoginRequest struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// RegisterRequest represents a registration request
+type RegisterRequest struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+	UserID   string `json:"user_id" binding:"required"`
+}
+
+// LoginHandler handles user login and returns JWT token
+func LoginHandler(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Request body must be valid JSON"})
+		return
+	}
+
+	// Simple authentication (in production, verify against database)
+	// For demo purposes, accept any username/password
+	// In production, you would:
+	// 1. Look up user in database
+	// 2. Verify password hash
+	// 3. Generate token
+
+	token, err := auth.GenerateToken(req.Username, req.Username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token":    token,
+		"username": req.Username,
+		"user_id":  req.Username,
+	})
+}
+
+// RegisterHandler handles user registration
+func RegisterHandler(c *gin.Context) {
+	var req RegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "Request body must be valid JSON"})
+		return
+	}
+
+	// In production, you would:
+	// 1. Hash the password
+	// 2. Store user in database
+	// 3. Generate token
+
+	token, err := auth.GenerateToken(req.UserID, req.Username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"token":    token,
+		"username": req.Username,
+		"user_id":  req.UserID,
+		"message":  "User registered successfully",
+	})
 }
 
 // GetTransactionDetailsHandler handles transaction details requests
@@ -500,4 +608,3 @@ func GetTransactionDebugHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, debugInfo)
 }
-
